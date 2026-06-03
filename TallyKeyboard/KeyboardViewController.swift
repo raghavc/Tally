@@ -42,6 +42,9 @@ class KeyboardViewController: UIInputViewController {
     private var suggestionSeparators: [UIView] = []
     private var currentSuggestions: [String] = []
     private let textChecker = UITextChecker()
+    /// The word currently being typed, tracked locally because `documentContextBeforeInput`
+    /// is empty/unreliable in many host fields (Safari bars, web inputs, etc.).
+    private var composingWord = ""
     private var suggestionBarHeight: CGFloat { isPad ? 48 : 42 }
     /// Vertical space the keys must leave at the top for the suggestion bar (none in emoji mode).
     private var keysTopInset: CGFloat { currentLayout == .emoji ? 0 : suggestionBarHeight }
@@ -556,6 +559,7 @@ class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(char)
         playClick()
         capture(char)
+        noteInserted(char)
         if isShifted && !isCapsLock && currentLayout == .letters {
             isShifted = false
             refreshLetterCases()
@@ -583,6 +587,7 @@ class KeyboardViewController: UIInputViewController {
             if !textBuffer.isEmpty { textBuffer.removeLast() }
             typingMetrics.recordBackspace()
         }
+        noteDeleted()
     }
 
     @objc private func deleteLongPress(_ g: UILongPressGestureRecognizer) {
@@ -595,6 +600,7 @@ class KeyboardViewController: UIInputViewController {
                     if !self.textBuffer.isEmpty { self.textBuffer.removeLast() }
                     self.typingMetrics.recordBackspace()
                 }
+                self.noteDeleted()
             }
         case .ended, .cancelled, .failed:
             deleteTimer?.invalidate(); deleteTimer = nil
@@ -618,15 +624,16 @@ class KeyboardViewController: UIInputViewController {
             lastSpaceTapTime = now
         }
         playClick()
+        noteInserted(" ")
     }
 
     @objc private func returnKeyPressed() {
-        textDocumentProxy.insertText("\n"); playClick(); capture("\n")
+        textDocumentProxy.insertText("\n"); playClick(); capture("\n"); noteInserted("\n")
     }
 
     @objc private func globeKeyPressed() { advanceToNextInputMode() }
-    @objc private func periodKeyPressed() { textDocumentProxy.insertText("."); playClick(); capture(".") }
-    @objc private func commaKeyPressed() { textDocumentProxy.insertText(","); playClick(); capture(",") }
+    @objc private func periodKeyPressed() { textDocumentProxy.insertText("."); playClick(); capture("."); noteInserted(".") }
+    @objc private func commaKeyPressed() { textDocumentProxy.insertText(","); playClick(); capture(","); noteInserted(",") }
 
     @objc private func switchToNumbers() { currentLayout = .numbers; rebuildKeys(); updateModeVisibility() }
     @objc private func switchToSymbols() { currentLayout = .symbols; rebuildKeys(); updateModeVisibility() }
@@ -978,6 +985,7 @@ class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(toInsert)
         playClick()
         capture(toInsert)
+        noteInserted(toInsert)
     }
 
     // MARK: - Glide math helpers
@@ -1084,14 +1092,33 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// The run of word characters immediately before the cursor (the word being typed).
+    /// The word currently being typed. Prefers the host's document context when it's
+    /// actually available; otherwise falls back to the locally-tracked composing word.
     private func currentWord() -> String {
-        let before = textDocumentProxy.documentContextBeforeInput ?? ""
-        var chars: [Character] = []
-        for ch in before.reversed() {
-            if ch.isLetter || ch == "'" { chars.append(ch) } else { break }
+        let ctx = textDocumentProxy.documentContextBeforeInput ?? ""
+        if !ctx.isEmpty {
+            var chars: [Character] = []
+            for ch in ctx.reversed() {
+                if ch.isLetter || ch == "'" { chars.append(ch) } else { break }
+            }
+            if !chars.isEmpty { return String(chars.reversed()) }
+            if let last = ctx.last, last.isWhitespace || last.isPunctuation { return "" }
         }
-        return String(chars.reversed())
+        return composingWord
+    }
+
+    /// Updates the locally-tracked composing word for an inserted string and refreshes
+    /// suggestions. Word characters extend the word; anything else ends it.
+    private func noteInserted(_ text: String) {
+        for ch in text {
+            if ch.isLetter || ch == "'" { composingWord.append(ch) } else { composingWord = "" }
+        }
+        updateSuggestions()
+    }
+
+    private func noteDeleted() {
+        if !composingWord.isEmpty { composingWord.removeLast() }
+        updateSuggestions()
     }
 
     private func updateSuggestions() {
@@ -1173,7 +1200,7 @@ class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(out)
         playClick()
         capture(out)              // data collection: counts toward contributed tokens
-        updateSuggestions()
+        noteInserted(out)         // resets the composing word and refreshes suggestions
     }
 
     // MARK: - Collection indicator
@@ -1262,6 +1289,7 @@ extension KeyboardViewController: UICollectionViewDataSource, UICollectionViewDe
         textDocumentProxy.insertText(e)
         playClick()
         capture(e)
+        composingWord = ""        // an emoji ends the current word
         recordRecentEmoji(e)
         collectionView.deselectItem(at: indexPath, animated: false)
     }
