@@ -45,6 +45,10 @@ class KeyboardViewController: UIInputViewController {
     /// The word currently being typed, tracked locally because `documentContextBeforeInput`
     /// is empty/unreliable in many host fields (Safari bars, web inputs, etc.).
     private var composingWord = ""
+    /// The most recently completed word — drives next-word (bigram) prediction.
+    private var lastWord = ""
+    /// previous word → top likely next words (loaded from bigrams.txt).
+    private var bigrams: [String: [String]] = [:]
     private var suggestionBarHeight: CGFloat { isPad ? 48 : 42 }
     /// Vertical space the keys must leave at the top for the suggestion bar (none in emoji mode).
     private var keysTopInset: CGFloat { currentLayout == .emoji ? 0 : suggestionBarHeight }
@@ -846,10 +850,22 @@ class KeyboardViewController: UIInputViewController {
                 byPair["\(f)\(l)", default: []].append(i)
                 byFirst[f, default: []].append(i)
             }
+            // Next-word (bigram) table: "w1 n1 n2 n3 n4" per line.
+            var bigrams: [String: [String]] = [:]
+            if let burl = Bundle.main.url(forResource: "bigrams", withExtension: "txt"),
+               let bcontent = try? String(contentsOf: burl, encoding: .utf8) {
+                for line in bcontent.split(whereSeparator: \.isNewline) {
+                    let parts = line.split(separator: " ")
+                    guard let first = parts.first else { continue }
+                    bigrams[String(first)] = parts.dropFirst().map(String.init)
+                }
+            }
+
             DispatchQueue.main.async {
                 self?.words = list
                 self?.wordIndexByPair = byPair
                 self?.wordIndexByFirst = byFirst
+                self?.bigrams = bigrams
             }
         }
     }
@@ -1111,7 +1127,12 @@ class KeyboardViewController: UIInputViewController {
     /// suggestions. Word characters extend the word; anything else ends it.
     private func noteInserted(_ text: String) {
         for ch in text {
-            if ch.isLetter || ch == "'" { composingWord.append(ch) } else { composingWord = "" }
+            if ch.isLetter || ch == "'" {
+                composingWord.append(ch)
+            } else {
+                if !composingWord.isEmpty { lastWord = composingWord }  // remember for next-word prediction
+                composingWord = ""
+            }
         }
         updateSuggestions()
     }
@@ -1146,7 +1167,7 @@ class KeyboardViewController: UIInputViewController {
         let prefix = currentWord()
         guard !prefix.isEmpty else {
             suggestionHasLiteral = false
-            return ["I", "The", "I'm"]   // simple sentence starters
+            return nextWordPredictions()
         }
         suggestionHasLiteral = true
         let lower = prefix.lowercased()
@@ -1174,6 +1195,16 @@ class KeyboardViewController: UIInputViewController {
         if let p = prediction { slots.append(p) }
         if let a = alternate, a != prediction { slots.append(a) }
         return slots
+    }
+
+    /// Predicts the next word from the previously-typed word (bigram model). Falls back to
+    /// generic starters when there's no preceding word or no data for it.
+    private func nextWordPredictions() -> [String] {
+        let prev = lastWord.lowercased()
+        if !prev.isEmpty, let nexts = bigrams[prev], !nexts.isEmpty {
+            return Array(nexts.prefix(3))
+        }
+        return ["I", "the", "we"]
     }
 
     private func applyCase(_ word: String, like prefix: String) -> String {
