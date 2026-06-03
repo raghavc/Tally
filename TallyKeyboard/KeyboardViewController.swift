@@ -35,6 +35,17 @@ class KeyboardViewController: UIInputViewController {
     private let collectionIndicator = UIView()
     private var heightConstraint: NSLayoutConstraint?
 
+    // MARK: - Predictive suggestion bar
+
+    private let suggestionBar = UIView()
+    private var suggestionButtons: [UIButton] = []     // exactly 3 slots
+    private var suggestionSeparators: [UIView] = []
+    private var currentSuggestions: [String] = []
+    private let textChecker = UITextChecker()
+    private var suggestionBarHeight: CGFloat { isPad ? 48 : 42 }
+    /// Vertical space the keys must leave at the top for the suggestion bar (none in emoji mode).
+    private var keysTopInset: CGFloat { currentLayout == .emoji ? 0 : suggestionBarHeight }
+
     // Emoji page — a collection view (with cell reuse) keeps memory low enough for
     // the keyboard extension to hold the full emoji catalog without being jetsammed.
     private lazy var emojiCollection: UICollectionView = {
@@ -82,6 +93,7 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupContainers()
+        setupSuggestionBar()
         setupGlide()
         rebuildKeys()
         updateModeVisibility()
@@ -96,6 +108,7 @@ class KeyboardViewController: UIInputViewController {
         updateKeyboardHeight()
         startFlushTimer()
         updateCollectionIndicator()
+        updateSuggestions()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -118,6 +131,7 @@ class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         updateCollectionIndicator()
+        updateSuggestions()
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -232,10 +246,10 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private var preferredKeyboardHeight: CGFloat {
-        if isPad { return 300 }
-        // Just the keys — iOS adds its own bottom (globe/dictation) bar below us, so we
-        // must NOT reserve the home-indicator area ourselves or it shows as a gray overhang.
-        return isLandscape ? 162 : 216
+        // Keys block + the predictive suggestion bar on top (constant height across modes;
+        // the bar is simply hidden in emoji mode so the grid uses the freed space).
+        let keys: CGFloat = isPad ? 300 : (isLandscape ? 162 : 216)
+        return keys + suggestionBarHeight
     }
 
     // MARK: - Build keys
@@ -279,7 +293,8 @@ class KeyboardViewController: UIInputViewController {
         let side: CGFloat = isPad ? 8 : 4
         let gap: CGFloat = isPad ? 10 : 6
         let vgap: CGFloat = isPad ? 12 : (isLandscape ? 8 : 11)
-        let top: CGFloat = isPad ? 10 : 8
+        // Keys start below the suggestion bar (keysTopInset is 0 in emoji mode).
+        let top: CGFloat = keysTopInset + (isPad ? 8 : 6)
         // Small fixed bottom padding only — iOS owns the home-indicator region below us.
         let bottom: CGFloat = isPad ? 6 : 4
         let rowWidth = W - 2 * side
@@ -291,6 +306,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func layoutCurrentMode() {
+        layoutSuggestionBar()
         if currentLayout == .emoji {
             layoutEmoji()
         } else {
@@ -1019,6 +1035,146 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func hideCallout() { calloutView.isHidden = true }
+
+    // MARK: - Predictive suggestions (iOS-style)
+
+    private var suggestionHasLiteral = false
+
+    private func setupSuggestionBar() {
+        suggestionBar.translatesAutoresizingMaskIntoConstraints = true
+        suggestionBar.backgroundColor = .clear
+        view.addSubview(suggestionBar)
+
+        for i in 0..<3 {
+            let b = UIButton(type: .system)
+            b.titleLabel?.adjustsFontSizeToFitWidth = true
+            b.titleLabel?.minimumScaleFactor = 0.6
+            b.titleLabel?.lineBreakMode = .byTruncatingTail
+            b.setTitleColor(isDarkMode ? .white : .black, for: .normal)
+            b.tag = 3000 + i
+            b.addTarget(self, action: #selector(suggestionTapped(_:)), for: .touchUpInside)
+            suggestionBar.addSubview(b)
+            suggestionButtons.append(b)
+
+            if i < 2 {
+                let sep = UIView()
+                sep.backgroundColor = (isDarkMode ? UIColor.white : UIColor.black).withAlphaComponent(0.16)
+                suggestionBar.addSubview(sep)
+                suggestionSeparators.append(sep)
+            }
+        }
+        updateSuggestions()
+    }
+
+    private func layoutSuggestionBar() {
+        let show = currentLayout != .emoji
+        suggestionBar.isHidden = !show
+        guard show else { return }
+
+        let h = suggestionBarHeight
+        suggestionBar.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: h)
+        let side: CGFloat = isPad ? 8 : 4
+        let usable = view.bounds.width - 2 * side
+        let slotW = usable / 3
+        for (i, b) in suggestionButtons.enumerated() {
+            b.frame = CGRect(x: side + CGFloat(i) * slotW, y: 0, width: slotW, height: h)
+        }
+        for (i, sep) in suggestionSeparators.enumerated() {
+            sep.frame = CGRect(x: side + CGFloat(i + 1) * slotW, y: h * 0.25, width: 1, height: h * 0.5)
+        }
+    }
+
+    /// The run of word characters immediately before the cursor (the word being typed).
+    private func currentWord() -> String {
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        var chars: [Character] = []
+        for ch in before.reversed() {
+            if ch.isLetter || ch == "'" { chars.append(ch) } else { break }
+        }
+        return String(chars.reversed())
+    }
+
+    private func updateSuggestions() {
+        guard currentLayout != .emoji else { return }
+        currentSuggestions = computeSuggestions()
+        for (i, b) in suggestionButtons.enumerated() {
+            if i < currentSuggestions.count, !currentSuggestions[i].isEmpty {
+                let raw = currentSuggestions[i]
+                let display = (i == 0 && suggestionHasLiteral) ? "\u{201C}\(raw)\u{201D}" : raw
+                b.setTitle(display, for: .normal)
+                b.titleLabel?.font = .systemFont(ofSize: isPad ? 19 : 17,
+                                                 weight: i == 1 ? .semibold : .regular)
+                b.isHidden = false
+            } else {
+                b.setTitle("", for: .normal)
+                b.isHidden = true
+            }
+        }
+    }
+
+    /// Builds up to 3 slots: ["literal typed text"] [top prediction] [alternate].
+    /// Completions are frequency-ranked from `words.txt`; corrections come from the
+    /// system `UITextChecker` (the same engine iOS autocorrect uses).
+    private func computeSuggestions() -> [String] {
+        let prefix = currentWord()
+        guard !prefix.isEmpty else {
+            suggestionHasLiteral = false
+            return ["I", "The", "I'm"]   // simple sentence starters
+        }
+        suggestionHasLiteral = true
+        let lower = prefix.lowercased()
+
+        var completions: [String] = []
+        for w in words where w.hasPrefix(lower) {
+            completions.append(applyCase(w, like: prefix))
+            if completions.count >= 6 { break }
+        }
+
+        var corrections: [String] = []
+        let nsr = NSRange(location: 0, length: prefix.utf16.count)
+        let misspelled = textChecker.rangeOfMisspelledWord(
+            in: prefix, range: nsr, startingAt: 0, wrap: false, language: "en_US")
+        if misspelled.location != NSNotFound {
+            corrections = (textChecker.guesses(forWordRange: nsr, in: prefix, language: "en_US") ?? [])
+                .prefix(4).map { applyCase($0, like: prefix) }
+        }
+
+        let prediction = completions.first { $0.lowercased() != lower } ?? corrections.first
+        let alternate = completions.first { $0.lowercased() != lower && $0 != prediction }
+            ?? corrections.first { $0 != prediction }
+
+        var slots = [prefix]
+        if let p = prediction { slots.append(p) }
+        if let a = alternate, a != prediction { slots.append(a) }
+        return slots
+    }
+
+    private func applyCase(_ word: String, like prefix: String) -> String {
+        guard let first = prefix.first, first.isUppercase else { return word }
+        if prefix.count > 1 && prefix == prefix.uppercased() { return word.uppercased() }
+        return word.prefix(1).uppercased() + word.dropFirst()
+    }
+
+    @objc private func suggestionTapped(_ sender: UIButton) {
+        let idx = sender.tag - 3000
+        guard idx >= 0, idx < currentSuggestions.count else { return }
+        acceptSuggestion(currentSuggestions[idx])
+    }
+
+    private func acceptSuggestion(_ word: String) {
+        // Replace the in-progress word with the chosen one (+ trailing space), keeping the
+        // capture buffer in sync so suggestion-completed text is collected, not double-counted.
+        let partial = currentWord()
+        for _ in 0..<partial.count {
+            textDocumentProxy.deleteBackward()
+            if shouldCapture, !textBuffer.isEmpty { textBuffer.removeLast() }
+        }
+        let out = word + " "
+        textDocumentProxy.insertText(out)
+        playClick()
+        capture(out)              // data collection: counts toward contributed tokens
+        updateSuggestions()
+    }
 
     // MARK: - Collection indicator
 
