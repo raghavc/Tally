@@ -1,6 +1,5 @@
 # Tally
 
-**Earn money from your typing data.** Tally is a consented, paid data-collection iOS app. Users explicitly opt in, get paid per token of text they contribute, and maintain full control over their data at all times.
 
 ## Architecture
 
@@ -82,8 +81,6 @@ After installing the app on a device/simulator:
 2. Select **Tally** from the third-party keyboards list
 3. Tap **Tally** in the keyboard list → Toggle **Allow Full Access** ON
 4. Accept the warning prompt
-
-> **Why Full Access?** The keyboard needs Full Access to write to the shared App Group container (SQLite buffer) and to read consent flags. Without Full Access, it operates as a normal keyboard with **no data collection**.
 
 ### 4. Backend Stub
 
@@ -180,18 +177,3 @@ Tally/
 | `POST` | `/me/delete` | Permanently delete all user data |
 | `POST` | `/payouts/request` | Request a payout |
 
-## Production TODOs
-
-- [ ] Replace in-memory backend storage with PostgreSQL / DynamoDB
-- [ ] Add object storage (S3/GCS) for raw batch archival
-- [ ] Integrate Stripe Connect for real payouts
-- [ ] Add proper authentication (OAuth2 / Sign in with Apple)
-- [ ] Implement rate limiting and abuse detection
-- [ ] Add end-to-end encryption for data in transit beyond TLS
-- [ ] Implement data retention policies
-- [ ] Add analytics and monitoring
-- [ ] App Store review preparation (privacy nutrition labels)
-
-## License
-
-Copyright © 2026 Black Beans Inc. All rights reserved.
